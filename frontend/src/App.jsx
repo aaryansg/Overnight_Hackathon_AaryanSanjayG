@@ -10,6 +10,7 @@ import KnowledgeBase from './components/KnowledgeBase';
 import Login from './components/Login';
 import Register from './components/Register';
 import ForgotPassword from './components/ForgotPassword';
+import AdminDashboard from './components/admin/AdminDashboard';
 import './components/Components.css';
 
 function App() {
@@ -17,19 +18,28 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [userProfile, setUserProfile] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userRole, setUserRole] = useState('user'); // 'user' or 'admin'
 
   useEffect(() => {
     // Check if user is authenticated (e.g., from localStorage)
     const token = localStorage.getItem('userToken');
+    const role = localStorage.getItem('userRole');
+    
     if (token) {
       setIsAuthenticated(true);
-      // Fetch user profile and documents
-      fetchUserData();
+      setUserRole(role || 'user');
+      // Fetch user profile and documents based on role
+      if (role === 'admin') {
+        // Redirect to admin dashboard will be handled by router
+        fetchAdminData();
+      } else {
+        fetchUserData();
+      }
     }
   }, []);
 
   const fetchUserData = () => {
-    // Mock API call for authenticated user
+    // Mock API call for regular user
     setTimeout(() => {
       setUserProfile({
         name: 'John Doe',
@@ -81,25 +91,53 @@ function App() {
     }, 1000);
   };
 
-  const handleLogin = (userData) => {
-    // Mock login logic
+  const fetchAdminData = () => {
+    // For admin, we don't need regular user data
+    setTimeout(() => {
+      setUserProfile({
+        name: 'Administrator',
+        role: 'System Administrator',
+        department: 'IT',
+        email: 'admin@infraco.com',
+        userId: 'ADMIN-001'
+      });
+      setLoading(false);
+    }, 500);
+  };
+
+  const handleLogin = (userData, role = 'user') => {
     localStorage.setItem('userToken', 'mock-jwt-token');
+    localStorage.setItem('userRole', role);
     setIsAuthenticated(true);
+    setUserRole(role);
     setUserProfile(userData);
-    fetchUserData();
+    
+    if (role === 'admin') {
+      fetchAdminData();
+    } else {
+      fetchUserData();
+    }
   };
 
   const handleLogout = () => {
     localStorage.removeItem('userToken');
+    localStorage.removeItem('userRole');
+    localStorage.removeItem('isAuthenticated');
+  
+  // Clear session storage
+    sessionStorage.clear();
+  
+  // Clear app state
     setIsAuthenticated(false);
+    setUserRole('user');
     setUserProfile(null);
     setDocuments([]);
   };
 
-  // Dashboard component
+  // Dashboard component for regular users
   const Dashboard = () => {
-    if (!isAuthenticated) {
-      return <Navigate to="/login" />;
+    if (!isAuthenticated || userRole === 'admin') {
+      return <Navigate to={userRole === 'admin' ? '/admin/dashboard' : '/login'} />;
     }
 
     return (
@@ -154,70 +192,124 @@ function App() {
   };
 
   // Protected Route wrapper
-  const ProtectedRoute = ({ children }) => {
+  const ProtectedRoute = ({ children, adminOnly = false }) => {
     if (!isAuthenticated) {
       return <Navigate to="/login" />;
     }
+    
+    if (adminOnly && userRole !== 'admin') {
+      return <Navigate to="/dashboard" />;
+    }
+    
+    if (!adminOnly && userRole === 'admin') {
+      return <Navigate to="/admin/dashboard" />;
+    }
+    
     return children;
+  };
+
+  const AdminProtectedRoute = ({ children }) => {
+    return <ProtectedRoute adminOnly={true}>{children}</ProtectedRoute>;
   };
 
   return (
     <Router>
       <div className="app">
-        {isAuthenticated ? (
-          <>
-            <div className="sidebar-container">
-              <Sidebar onLogout={handleLogout} userProfile={userProfile} />
-            </div>
-            <div className="main-container">
-              <Navbar userProfile={userProfile} />
-              <main className="main-content-area">
-                <Routes>
-                  <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                  <Route path="/dashboard" element={
-                    <ProtectedRoute>
-                      <Dashboard />
-                    </ProtectedRoute>
-                  } />
-                  <Route path="/library" element={
-                    <ProtectedRoute>
-                      <DocumentLibrary documents={documents} loading={loading} user={userProfile} />
-                    </ProtectedRoute>
-                  } />
-                  <Route path="/insights" element={
-                    <ProtectedRoute>
-                      <InsightsDashboard documents={documents} loading={loading} />
-                    </ProtectedRoute>
-                  } />
-                  <Route path="/knowledge" element={
-                    <ProtectedRoute>
-                      <KnowledgeBase documents={documents} loading={loading} />
-                    </ProtectedRoute>
-                  } />
-                  <Route path="/notifications" element={
-                    <ProtectedRoute>
-                      <div>Notifications Page</div>
-                    </ProtectedRoute>
-                  } />
-                  <Route path="/settings" element={
-                    <ProtectedRoute>
-                      <div>Settings Page</div>
-                    </ProtectedRoute>
-                  } />
-                  <Route path="*" element={<Navigate to="/dashboard" />} />
-                </Routes>
-              </main>
-            </div>
-          </>
-        ) : (
-          // Auth routes when not authenticated
-          <Routes>
-            <Route path="/login" element={<Login onLogin={handleLogin} />} />
-            <Route path="/register" element={<Register />} />
-            <Route path="/forgot-password" element={<ForgotPassword />} />
-            <Route path="*" element={<Navigate to="/login" />} />
-          </Routes>
-        )}
+        <Routes>
+          {/* Auth Routes */}
+          <Route path="/login" element={
+            isAuthenticated ? (
+              <Navigate to={userRole === 'admin' ? '/admin/dashboard' : '/dashboard'} />
+            ) : (
+              <Login onLogin={handleLogin} />
+            )
+          } />
+          <Route path="/register" element={<Register />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          
+          {/* Regular User Routes */}
+          <Route path="/" element={
+            isAuthenticated ? (
+              <Navigate to={userRole === 'admin' ? '/admin/dashboard' : '/dashboard'} />
+            ) : (
+              <Navigate to="/login" />
+            )
+          } />
+          
+          <Route path="/dashboard" element={
+            <ProtectedRoute>
+              <>
+                <div className="sidebar-container">
+                  <Sidebar onLogout={handleLogout} userProfile={userProfile} />
+                </div>
+                <div className="main-container">
+                  <Navbar userProfile={userProfile} />
+                  <main className="main-content-area">
+                    <Dashboard />
+                  </main>
+                </div>
+              </>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/library" element={
+            <ProtectedRoute>
+              <>
+                <div className="sidebar-container">
+                  <Sidebar onLogout={handleLogout} userProfile={userProfile} />
+                </div>
+                <div className="main-container">
+                  <Navbar userProfile={userProfile} />
+                  <main className="main-content-area">
+                    <DocumentLibrary documents={documents} loading={loading} user={userProfile} />
+                  </main>
+                </div>
+              </>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/insights" element={
+            <ProtectedRoute>
+              <>
+                <div className="sidebar-container">
+                  <Sidebar onLogout={handleLogout} userProfile={userProfile} />
+                </div>
+                <div className="main-container">
+                  <Navbar userProfile={userProfile} />
+                  <main className="main-content-area">
+                    <InsightsDashboard documents={documents} loading={loading} />
+                  </main>
+                </div>
+              </>
+            </ProtectedRoute>
+          } />
+          
+          <Route path="/knowledge" element={
+            <ProtectedRoute>
+              <>
+                <div className="sidebar-container">
+                  <Sidebar onLogout={handleLogout} userProfile={userProfile} />
+                </div>
+                <div className="main-container">
+                  <Navbar userProfile={userProfile} />
+                  <main className="main-content-area">
+                    <KnowledgeBase documents={documents} loading={loading} />
+                  </main>
+                </div>
+              </>
+            </ProtectedRoute>
+          } />
+          
+          {/* Admin Routes */}
+          <Route path="/admin/*" element={
+            <AdminProtectedRoute>
+              <AdminDashboard onLogout={handleLogout} />
+            </AdminProtectedRoute>
+          } />
+          
+          {/* Fallback route */}
+          <Route path="*" element={<Navigate to="/login" />} />
+        </Routes>
       </div>
     </Router>
   );
