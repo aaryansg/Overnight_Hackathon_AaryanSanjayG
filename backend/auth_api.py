@@ -1,3 +1,4 @@
+# auth_api.py
 from flask import Blueprint, request, jsonify
 from models import db, User, Document
 import os
@@ -6,7 +7,8 @@ import uuid
 import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 from dotenv import load_dotenv
-import base64
+import jwt
+import datetime
 
 load_dotenv()
 
@@ -34,72 +36,117 @@ def get_s3_client():
         region_name=AWS_REGION
     )
 
-# Simple authentication helper
+# JWT Configuration
+JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'infradoc-ai-secret-jwt-key-2024')
+
+def generate_token(user_id, username, role, department):
+    """Generate JWT token"""
+    payload = {
+        'user_id': user_id,
+        'username': username,
+        'role': role,
+        'department': department,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm='HS256')
+
+def verify_token(token):
+    """Verify JWT token"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=['HS256'])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
 def authenticate_user(username, password, required_role=None):
     """Authenticate user and check optional role requirement"""
     user = User.query.filter_by(username=username).first()
     
     if not user:
+        print(f"❌ User not found: {username}")
         return None
     
     if not user.check_password(password):
+        print(f"❌ Password incorrect for user: {username}")
         return None
     
     if not user.is_active:
+        print(f"❌ User inactive: {username}")
         return None
     
     if required_role and user.role != required_role:
+        print(f"❌ Role mismatch. Required: {required_role}, User has: {user.role}")
         return None
     
     return user
 
 def get_user_from_request():
-    """Extract user credentials from request"""
-    # Try Basic Auth header
-    auth_header = request.headers.get('Authorization')
-    if auth_header and auth_header.startswith('Basic '):
-        try:
-            auth_decoded = base64.b64decode(auth_header[6:]).decode('utf-8')
-            username, password = auth_decoded.split(':', 1)
-            return username, password
-        except:
-            pass
+    """Extract user credentials from request - supports multiple methods"""
     
-    # Try JSON body
+    # Method 1: Try JWT token in Authorization header
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.startswith('Bearer '):
+        token = auth_header.split(' ')[1]
+        payload = verify_token(token)
+        if payload:
+            user = User.query.get(payload['user_id'])
+            if user:
+                return user.username, None  # Return username, no password needed
+    
+    # Method 2: Try JSON body
     data = request.get_json(silent=True)
     if data:
         username = data.get('username')
         password = data.get('password')
         if username and password:
+            print(f"📝 Got credentials from JSON: {username}")
             return username, password
     
-    # Try form data
+    # Method 3: Try form data
     username = request.form.get('username')
     password = request.form.get('password')
     if username and password:
+        print(f"📝 Got credentials from form: {username}")
         return username, password
     
-    # Try query parameters
+    # Method 4: Try query parameters
     username = request.args.get('username')
     password = request.args.get('password')
     if username and password:
+        print(f"📝 Got credentials from query: {username}")
         return username, password
     
+    print("❌ No credentials found in request")
     return None, None
 
 def auth_required(required_role=None):
     """Decorator for authentication"""
     def decorator(f):
         def wrapper(*args, **kwargs):
+            print(f"🔐 Auth required for endpoint: {request.path}")
             username, password = get_user_from_request()
             
-            if not username or not password:
+            if not username:
+                print("❌ Missing username")
                 return jsonify({'error': 'Authentication required'}), 401
             
-            user = authenticate_user(username, password, required_role)
-            if not user:
-                return jsonify({'error': 'Invalid credentials or insufficient permissions'}), 401
+            # If we have a JWT token (password is None), we need to get the user differently
+            if password is None:
+                # Get user from database
+                user = User.query.filter_by(username=username).first()
+                if not user:
+                    print(f"❌ User not found: {username}")
+                    return jsonify({'error': 'Invalid credentials'}), 401
+            else:
+                # Use password authentication
+                user = authenticate_user(username, password, required_role)
+                if not user:
+                    print(f"❌ Authentication failed for user: {username}")
+                    return jsonify({'error': 'Invalid credentials or insufficient permissions'}), 401
             
+            print(f"✅ User authenticated: {username}")
             # Attach user to request context
             request.user = user
             return f(*args, **kwargs)
@@ -169,8 +216,16 @@ def login():
         if not user.is_active:
             return jsonify({'error': 'Account is disabled'}), 403
         
+        # Update last login
+        user.last_login = datetime.datetime.utcnow()
+        db.session.commit()
+        
+        # Generate JWT token
+        token = generate_token(user.id, user.username, user.role, user.department)
+        
         return jsonify({
             'message': 'Login successful',
+            'token': token,
             'user': user.to_dict()
         })
         
@@ -178,21 +233,15 @@ def login():
         return jsonify({'error': str(e)}), 500
 
 @auth_bp.route('/logout', methods=['POST'])
+@auth_required()
 def logout():
     return jsonify({'message': 'Logged out successfully'})
 
-@auth_bp.route('/me', methods=['POST'])
+@auth_bp.route('/me', methods=['GET'])
+@auth_required()
 def get_current_user_info():
     try:
-        data = request.get_json()
-        
-        if not data or not data.get('username') or not data.get('password'):
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = authenticate_user(data['username'], data['password'])
-        if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
+        user = request.user
         return jsonify(user.to_dict())
         
     except Exception as e:
@@ -200,7 +249,6 @@ def get_current_user_info():
 
 @auth_bp.route('/departments', methods=['GET'])
 def get_departments():
-    # Return the DEPARTMENTS list as JSON
     return jsonify(DEPARTMENTS)
 
 @auth_bp.route('/categories', methods=['GET'])
@@ -271,25 +319,36 @@ def upload_document():
 @doc_bp.route('/upload-s3', methods=['POST'])
 def upload_document_s3():
     try:
-        # Get credentials from form data
+        print("📤 Starting S3 upload...")
+        
+        # Get credentials
         username = request.form.get('username')
         password = request.form.get('password')
         
+        print(f"📝 Received credentials - Username: {username}, Password: {'*' * len(password) if password else 'None'}")
+        
         if not username or not password:
+            print("❌ Missing credentials in form data")
             return jsonify({'error': 'Authentication required'}), 401
         
         user = authenticate_user(username, password)
         if not user:
+            print("❌ Authentication failed in upload-s3")
             return jsonify({'error': 'Invalid credentials'}), 401
         
+        print(f"✅ User authenticated: {user.username}")
+        
         if 'file' not in request.files:
+            print("❌ No file in request")
             return jsonify({'error': 'No file uploaded'}), 400
         
         file = request.files['file']
         if file.filename == '':
+            print("❌ Empty filename")
             return jsonify({'error': 'No file selected'}), 400
         
         if not allowed_file(file.filename):
+            print(f"❌ Invalid file type: {file.filename}")
             return jsonify({'error': 'File type not allowed'}), 400
         
         # Get form data
@@ -299,12 +358,17 @@ def upload_document_s3():
         category = request.form.get('category', '')
         tags = request.form.get('tags', '')
         
+        print(f"📝 Upload info - Filename: {file.filename}, Department: {department}")
+        
         if department not in DEPARTMENTS:
+            print(f"❌ Invalid department: {department}")
             return jsonify({'error': 'Invalid department'}), 400
         
         # Generate unique filename for S3
         filename = secure_filename(file.filename)
-        unique_filename = f"{uuid.uuid4().hex}_{filename}"
+        unique_filename = f"uploads/{department}/{uuid.uuid4().hex}_{filename}"
+        
+        print(f"📁 Generated filename: {unique_filename}")
         
         # Upload to S3
         s3_client = get_s3_client()
@@ -314,6 +378,8 @@ def upload_document_s3():
             file_content = file.read()
             file_size = len(file_content)
             file.seek(0)  # Reset file pointer for upload
+            
+            print(f"📊 File size: {file_size} bytes")
             
             # Upload file to S3
             s3_client.upload_fileobj(
@@ -326,10 +392,13 @@ def upload_document_s3():
                         'uploaded-by': user.username,
                         'department': department,
                         'category': category,
-                        'original-filename': filename
+                        'original-filename': filename,
+                        'processed': 'false'
                     }
                 }
             )
+            
+            print(f"✅ File uploaded to S3: {unique_filename}")
             
             # Generate S3 URL
             s3_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{unique_filename}"
@@ -339,7 +408,7 @@ def upload_document_s3():
                 title=title or filename,
                 description=description,
                 filename=filename,
-                file_path=s3_url,  # Store S3 URL instead of local path
+                file_path=s3_url,
                 file_size=file_size,
                 file_type=filename.rsplit('.', 1)[1].lower(),
                 department=department,
@@ -352,34 +421,34 @@ def upload_document_s3():
             db.session.add(document)
             db.session.commit()
             
+            print(f"✅ Document saved to database with ID: {document.id}")
+            
             return jsonify({
                 'message': 'File uploaded to S3 successfully',
                 'document': document.to_dict(),
-                's3_url': s3_url
+                's3_url': s3_url,
+                's3_key': unique_filename
             }), 201
             
         except NoCredentialsError:
+            print("❌ AWS credentials not available")
             return jsonify({'error': 'AWS credentials not available'}), 500
         except ClientError as e:
+            print(f"❌ S3 upload error: {str(e)}")
             return jsonify({'error': f'S3 upload error: {str(e)}'}), 500
             
     except Exception as e:
         db.session.rollback()
+        print(f"❌ Unexpected error in upload-s3: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/documents', methods=['GET'])
+@auth_required()
 def get_documents():
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = authenticate_user(username, password)
-        if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
+        user = request.user
         
         department = request.args.get('department')
         category = request.args.get('category')
@@ -410,18 +479,10 @@ def get_documents():
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/documents/<int:doc_id>', methods=['GET'])
+@auth_required()
 def get_document(doc_id):
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = authenticate_user(username, password)
-        if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
+        user = request.user
         
         document = Document.query.get_or_404(doc_id)
         
@@ -439,18 +500,10 @@ def get_document(doc_id):
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/documents/<int:doc_id>/download', methods=['GET'])
+@auth_required()
 def download_document(doc_id):
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = authenticate_user(username, password)
-        if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
+        user = request.user
         
         document = Document.query.get_or_404(doc_id)
         
@@ -491,18 +544,10 @@ def download_document(doc_id):
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/documents/<int:doc_id>/presigned-url', methods=['GET'])
+@auth_required()
 def get_presigned_url(doc_id):
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = authenticate_user(username, password)
-        if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
+        user = request.user
         
         document = Document.query.get_or_404(doc_id)
         

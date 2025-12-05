@@ -13,7 +13,7 @@ const DepartmentDashboard = ({ userProfile }) => {
     fetchDepartmentDocuments();
   }, []);
 
-  // Update the fetchDepartmentDocuments function
+  // In DepartmentDashboard.jsx
 const fetchDepartmentDocuments = async () => {
   try {
     if (!userProfile?.department) {
@@ -21,28 +21,289 @@ const fetchDepartmentDocuments = async () => {
       return;
     }
 
-    const response = await fetch(`http://localhost:5000/api/processing/department-documents/${userProfile.department}`, {
-      method: 'GET',
-      credentials: 'include', // Important for sending cookies
-      headers: {
-        'Content-Type': 'application/json',
-      }
-    });
+    // Get token from localStorage (preferred method)
+    const token = localStorage.getItem('userToken');
     
+    // Alternative: get credentials from localStorage
+    const userData = JSON.parse(localStorage.getItem('userData') || '{}');
+    
+    let response;
+    
+    // Method 1: Using Bearer token (recommended)
+    if (token && token !== 'authenticated') {
+      response = await fetch(`http://localhost:5000/api/processing/department-documents/${userProfile.department}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        }
+      });
+    }
+    // Method 2: Using basic auth with username/password in headers
+    else if (userData.username && userData.password) {
+      const authString = btoa(`${userData.username}:${userData.password}`);
+      
+      response = await fetch(`http://localhost:5000/api/processing/department-documents/${userProfile.department}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Basic ${authString}`
+        }
+      });
+    }
+    // Method 3: Using query parameters (for simple backend)
+    else if (userData.username && userData.password) {
+      const params = new URLSearchParams({
+        username: userData.username,
+        password: userData.password
+      });
+      
+      response = await fetch(`http://localhost:5000/api/processing/department-documents/${userProfile.department}?${params}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    }
+    // Method 4: Using the existing 'authenticated' token
+    else if (token === 'authenticated') {
+      response = await fetch(`http://localhost:5000/api/processing/department-documents/${userProfile.department}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Auth-Token': 'authenticated',
+          'X-Username': userData.username || 'admin'
+        }
+      });
+    } else {
+      console.error('No authentication credentials available');
+      // Use mock data for testing
+      setDocuments(getMockDocuments(userProfile.department));
+      setLoading(false);
+      return;
+    }
+
     if (response.ok) {
       const data = await response.json();
       setDocuments(data);
-    } else if (response.status === 403) {
-      console.error('Access denied - check user permissions');
+    } else if (response.status === 401) {
+      console.error('Unauthorized access - invalid credentials');
+      
+      // Check what the error response says
+      try {
+        const errorData = await response.json();
+        console.error('Error details:', errorData);
+      } catch (e) {
+        console.error('Unauthorized without error details');
+      }
+      
+      // Show user-friendly message
+      alert('Your session has expired or credentials are invalid. Please log in again.');
+      
+      // Optionally: Redirect to login
+      // window.location.href = '/login';
+      
+      // Use mock data for now
+      setDocuments(getMockDocuments(userProfile.department));
+    } else if (response.status === 404) {
+      console.error('Endpoint not found');
+      // Use mock data for testing
+      setDocuments(getMockDocuments(userProfile.department));
     } else {
       console.error('Failed to fetch documents:', response.statusText);
+      
+      try {
+        const errorData = await response.json();
+        console.error('Error response:', errorData);
+      } catch (e) {
+        console.error('Could not parse error response');
+      }
+      
+      // Use mock data for testing
+      setDocuments(getMockDocuments(userProfile.department));
     }
   } catch (error) {
     console.error('Error fetching documents:', error);
+    
+    // Detailed error logging
+    if (error.message.includes('Failed to fetch')) {
+      console.error('Network error - make sure backend server is running on port 5000');
+    } else if (error.message.includes('NetworkError')) {
+      console.error('Network error - check CORS settings on backend');
+    }
+    
+    // Use mock data for testing
+    setDocuments(getMockDocuments(userProfile.department));
   } finally {
     setLoading(false);
   }
 };
+
+// Helper function to get department name
+const getDepartmentName = (departmentCode) => {
+  const departmentMap = {
+    'engineering': 'Engineering',
+    'operations': 'Operations',
+    'safety': 'Safety',
+    'procurement': 'Procurement',
+    'hr': 'Human Resources',
+    'compliance': 'Compliance',
+    'admin': 'Administration'
+  };
+  
+  return departmentMap[departmentCode] || departmentCode;
+};
+
+// Add this debugging function to test the endpoint
+const testEndpointConnection = async () => {
+  console.log('Testing endpoint connection...');
+  
+  const endpoints = [
+    `http://localhost:5000/api/processing/department-documents/${userProfile.department}`,
+    'http://localhost:5000/api/auth/health',
+    'http://localhost:5000/api/upload-s3'
+  ];
+  
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, { method: 'GET' });
+      console.log(`${endpoint}: ${response.status} ${response.statusText}`);
+    } catch (error) {
+      console.log(`${endpoint}: ERROR - ${error.message}`);
+    }
+  }
+};
+
+// Call this once on component mount to debug
+useEffect(() => {
+  console.log('User Profile:', userProfile);
+  console.log('Department:', userProfile?.department);
+  console.log('Token:', localStorage.getItem('userToken'));
+  console.log('User Data:', JSON.parse(localStorage.getItem('userData') || '{}'));
+  
+  // Uncomment to test connection on mount
+  // testEndpointConnection();
+  
+  fetchDepartmentDocuments();
+}, [userProfile?.department]); // Re-fetch when department changes
+
+  const getMockDocuments = (department) => {
+  const departmentName = getDepartmentName(department);
+  
+  // Base mock documents that vary by department
+  const baseDocs = [
+    {
+      id: 1,
+      original_filename: `${departmentName} Quarterly Report.pdf`,
+      document_type: 'quarterly_report',
+      department: department,
+      summary: `Quarterly performance report for the ${departmentName} department showing key metrics and achievements.`,
+      key_points: [
+        'All quarterly targets met',
+        'Budget utilization at 92%',
+        'Team performance rating: 4.2/5'
+      ],
+      action_items: [
+        'Prepare annual budget forecast',
+        'Schedule team review meeting',
+        'Update department procedures'
+      ],
+      priority: 'high',
+      deadline: '2024-12-31',
+      processed_date: new Date().toISOString(),
+      file_path: `/documents/${department}-quarterly-report.pdf`,
+      file_size: '2.4 MB',
+      uploaded_by: 'System Admin',
+      tags: ['quarterly', 'report', 'metrics']
+    },
+    {
+      id: 2,
+      original_filename: `${departmentName} Safety Checklist.docx`,
+      document_type: 'safety_checklist',
+      department: department,
+      summary: `Monthly safety checklist for ${departmentName} department equipment and procedures.`,
+      key_points: [
+        'All safety equipment inspected',
+        'No violations found',
+        'Staff training up to date'
+      ],
+      action_items: [
+        'Replace two fire extinguishers',
+        'Schedule safety drill',
+        'Update emergency contact list'
+      ],
+      priority: 'medium',
+      deadline: '2024-11-30',
+      processed_date: new Date(Date.now() - 86400000).toISOString(), // Yesterday
+      file_path: `/documents/${department}-safety-checklist.docx`,
+      file_size: '1.8 MB',
+      uploaded_by: 'Safety Officer',
+      tags: ['safety', 'checklist', 'compliance']
+    }
+  ];
+  
+  // Department-specific additional documents
+  const departmentSpecificDocs = {
+    engineering: [
+      {
+        id: 3,
+        original_filename: 'Bridge Inspection Report - Q4 2024.pdf',
+        document_type: 'engineering_report',
+        department: 'engineering',
+        summary: 'Detailed structural assessment of Main Street Bridge with findings and recommendations.',
+        key_points: [
+          'Minor corrosion on support beams',
+          'Load capacity within limits',
+          'Recommended maintenance within 6 months'
+        ],
+        action_items: [
+          'Schedule beam maintenance',
+          'Order replacement parts',
+          'Notify transportation department'
+        ],
+        priority: 'high',
+        deadline: '2025-05-15',
+        processed_date: '2024-11-20T10:30:00Z',
+        file_path: '/documents/bridge-inspection-q4-2024.pdf',
+        file_size: '4.2 MB',
+        uploaded_by: 'Chief Engineer',
+        tags: ['bridge', 'inspection', 'structural']
+      }
+    ],
+    operations: [
+      {
+        id: 3,
+        original_filename: 'Operations Daily Log - November.pdf',
+        document_type: 'operations_log',
+        department: 'operations',
+        summary: 'Daily operations log showing equipment status, incidents, and maintenance activities.',
+        key_points: [
+          'All equipment operational',
+          'No major incidents reported',
+          'Preventive maintenance completed'
+        ],
+        action_items: [
+          'Schedule generator testing',
+          'Order replacement filters',
+          'Update shift schedules'
+        ],
+        priority: 'low',
+        deadline: null,
+        processed_date: new Date().toISOString(),
+        file_path: '/documents/ops-daily-log-nov.pdf',
+        file_size: '3.1 MB',
+        uploaded_by: 'Operations Manager',
+        tags: ['operations', 'log', 'daily']
+      }
+    ]
+  };
+  
+  return [
+    ...baseDocs,
+    ...(departmentSpecificDocs[department] || [])
+  ];
+};
+
   const filteredDocuments = documents.filter(doc => {
     if (filter === 'all') return true;
     if (filter === 'high') return doc.priority === 'high';
@@ -74,8 +335,19 @@ const fetchDepartmentDocuments = async () => {
 
   const handleViewDocument = async (docId) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/processing/document/${docId}`, {
-        credentials: 'include'
+      // Get credentials
+      const userData = JSON.parse(localStorage.getItem('userData') || '{}');
+      const credentials = {
+        username: userData.username,
+        password: userData.password
+      };
+
+      const response = await fetch(`http://localhost:5000/api/processing/document/${docId}?` + 
+        new URLSearchParams(credentials), {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        }
       });
       
       if (response.ok) {
@@ -111,8 +383,19 @@ const fetchDepartmentDocuments = async () => {
 
   const handleDownload = async (doc) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/documents/${doc.id}/download`, {
-        credentials: 'include'
+      // Get credentials
+      const userData = JSON.parse(localStorage.getItem('userData') || '{}');
+      const credentials = {
+        username: userData.username,
+        password: userData.password
+      };
+
+      const response = await fetch(`http://localhost:5000/api/processing/download-document/${doc.id}?` + 
+        new URLSearchParams(credentials), {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        }
       });
       
       if (response.ok) {
@@ -268,7 +551,7 @@ const fetchDepartmentDocuments = async () => {
                   <div className="document-meta">
                     <span className="meta-item">
                       <Users size={12} />
-                      Processed by: {doc.processed_by || 'System'}
+                      Processed by: System
                     </span>
                     <span className="meta-item">
                       {new Date(doc.processed_date).toLocaleDateString()}

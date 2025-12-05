@@ -1,10 +1,11 @@
+# processing_api.py
 from flask import Blueprint, request, jsonify
 import os
 import uuid
 import json
 from datetime import datetime
 from werkzeug.utils import secure_filename
-from models import db, Document, User, ProcessedDocument
+from models import db, User, Document, ProcessedDocument
 from model import (
     batch_process_s3_documents, 
     auto_fetch_and_process,
@@ -13,6 +14,7 @@ from model import (
     download_from_s3,
     DocumentProcessingResult
 )
+import jwt
 
 processing_bp = Blueprint('processing', __name__)
 
@@ -21,10 +23,32 @@ ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt',
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# Simple auth helper for processing API
+# JWT Configuration
+JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'infradoc-ai-secret-jwt-key-2024')
+
+def verify_token(token):
+    """Verify JWT token"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=['HS256'])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
 def authenticate_user_from_request():
-    """Extract and authenticate user from request"""
-    # Try to get credentials from various sources
+    """Extract and authenticate user from request using JWT or credentials"""
+    # Method 1: Try JWT token
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.startswith('Bearer '):
+        token = auth_header.split(' ')[1]
+        payload = verify_token(token)
+        if payload:
+            user = User.query.get(payload['user_id'])
+            if user and user.is_active:
+                return user
+    
+    # Method 2: Try credentials from various sources
     username = None
     password = None
     
@@ -123,25 +147,14 @@ def auto_process_documents():
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/process-s3-document', methods=['POST'])
+@auth_required_api(required_role='admin')
 def process_s3_document_api():
     try:
+        user = request.user
+        
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No data provided'}), 400
-        
-        # Get credentials
-        username = data.get('username')
-        password = data.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
-        if user.role != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
         
         s3_key = data.get('s3_key')
         if not s3_key:
@@ -188,21 +201,10 @@ def process_s3_document_api():
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/list-s3-documents', methods=['GET'])
+@auth_required_api(required_role='admin')
 def list_s3_documents_api():
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
-        if user.role != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
+        user = request.user
         
         department = request.args.get('department')
         limit = request.args.get('limit', 50, type=int)
@@ -219,18 +221,10 @@ def list_s3_documents_api():
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/department-documents/<department>', methods=['GET'])
+@auth_required_api()
 def get_department_documents(department):
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({'error': 'Invalid credentials'}), 401
+        user = request.user
         
         # Check if user has access to this department
         if user.role != 'admin' and user.department != department:
@@ -294,18 +288,10 @@ def get_department_documents(department):
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/document/<int:doc_id>', methods=['GET'])
+@auth_required_api()
 def get_document_details(doc_id):
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({'error': 'Invalid credentials'}), 401
+        user = request.user
         
         document = ProcessedDocument.query.get_or_404(doc_id)
         
@@ -334,21 +320,10 @@ def get_document_details(doc_id):
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/documents/summary', methods=['GET'])
+@auth_required_api(required_role='admin')
 def get_documents_summary():
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
-        if user.role != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
+        user = request.user
         
         # Get database documents
         db_documents = ProcessedDocument.query.all()
@@ -410,25 +385,14 @@ def get_documents_summary():
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/trigger-processing', methods=['POST'])
+@auth_required_api(required_role='admin')
 def trigger_processing():
     try:
+        user = request.user
+        
         data = request.get_json() or {}
-        
-        # Get credentials from request
-        username = data.get('username')
-        password = data.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
-        if user.role != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
         department = data.get('department')
+        
         result = auto_fetch_and_process(department)
         
         return jsonify({
@@ -440,18 +404,10 @@ def trigger_processing():
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/download-document/<int:doc_id>', methods=['GET'])
+@auth_required_api()
 def download_document(doc_id):
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({'error': 'Invalid credentials'}), 401
+        user = request.user
         
         document = ProcessedDocument.query.get_or_404(doc_id)
         
@@ -477,20 +433,10 @@ def download_document(doc_id):
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/get-s3-url/<s3_key>', methods=['GET'])
+@auth_required_api()
 def get_s3_url(s3_key):
     try:
-        # Get credentials
-        username = request.args.get('username')
-        password = request.args.get('password')
-        
-        if not username or not password:
-            return jsonify({'error': 'Authentication required'}), 401
-        
-        user = User.query.filter_by(username=username).first()
-        if not user or not user.check_password(password):
-            return jsonify({'error': 'Invalid credentials'}), 401
-        
-        # For now, let's allow any authenticated user to access S3 URLs
+        user = request.user
         
         from model import s3_client, AWS_S3_BUCKET, AWS_REGION
         

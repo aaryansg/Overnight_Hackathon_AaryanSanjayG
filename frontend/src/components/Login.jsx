@@ -59,71 +59,49 @@ const Login = ({ onLogin }) => {
   };
 
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
+  e.preventDefault();
+  setLoading(true);
+  setError('');
 
-    // Basic validation
-    if (!formData.username.trim() || !formData.password.trim()) {
-      setError('Please enter both username and password');
-      setLoading(false);
-      return;
+  // Basic validation
+  if (!formData.username.trim() || !formData.password.trim()) {
+    setError('Please enter both username and password');
+    setLoading(false);
+    return;
+  }
+
+  try {
+    const response = await fetch('http://localhost:5000/api/auth/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        username: formData.username,
+        password: formData.password
+      })
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      
+      // Call onLogin with user data INCLUDING PASSWORD
+      onLogin({
+        ...data.user,
+        password: formData.password // Store the actual password
+      }, data.user.role);
+      
+    } else {
+      const errorData = await response.json();
+      setError(errorData.error || 'Login failed');
     }
-
-    // Try backend API first
-    if (backendStatus === 'online') {
-      try {
-        const response = await fetch('http://localhost:5000/api/auth/login', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            username: formData.username,
-            password: formData.password
-          })
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          
-          // Successful login via backend
-          const userData = {
-            id: data.user.id,
-            name: data.user.username,
-            username: data.user.username,
-            email: data.user.email,
-            role: data.user.role,
-            department: data.user.department,
-            userId: `USER-${data.user.id.toString().padStart(3, '0')}`
-          };
-
-          localStorage.setItem('userToken', 'authenticated');
-          localStorage.setItem('userRole', data.user.role);
-          localStorage.setItem('userData', JSON.stringify(userData));
-
-          onLogin(userData, data.user.role);
-
-          if (data.user.role === 'admin') {
-            navigate('/admin/dashboard');
-          } else {
-            navigate('/department-dashboard');
-          }
-          return;
-        } else {
-          // Try fallback login for testing
-          console.log('Backend login failed, trying fallback...');
-        }
-      } catch (error) {
-        console.log('Backend error, using fallback login:', error);
-      }
-    }
-
-    // Fallback to local login (for testing/demo)
-    handleFallbackLogin();
-  };
-
+  } catch (error) {
+    console.error('Login error:', error);
+    setError('Network error. Please try again.');
+  } finally {
+    setLoading(false);
+  }
+};
   const handleFallbackLogin = () => {
     // Fallback test users (remove in production)
     const testUsers = {
@@ -247,27 +225,29 @@ const Login = ({ onLogin }) => {
     }
   };
 
-  const handleQuickLogin = (username) => {
-    const testUsers = {
-      admin: { username: 'admin', password: 'admin123' },
-      engineer: { username: 'engineer', password: 'Engineer123' },
-      operator: { username: 'operator', password: 'Operator123' },
-      safety: { username: 'safety', password: 'Safety123' },
-      procurement: { username: 'procurement', password: 'Procurement123' },
-      hr: { username: 'hr', password: 'Hr123' },
-      compliance: { username: 'compliance', password: 'Compliance123' },
-      john: { username: 'john', password: 'John123' },
-      sarah: { username: 'sarah', password: 'Sarah123' }
-    };
-
-    const user = testUsers[username];
-    if (user) {
-      setFormData({
-        username: user.username,
-        password: user.password
-      });
-    }
+  const handleQuickLogin = (userData, role) => {
+  // Store user data with password for API calls
+  console.log('📝 Storing user data:', userData);
+  
+  const userToStore = {
+    ...userData,
+    password: userData.password || 'admin123' // Use actual password from login
   };
+  
+  localStorage.setItem('userToken', 'authenticated');
+  localStorage.setItem('userRole', role);
+  localStorage.setItem('userData', JSON.stringify(userToStore));
+  
+  setIsAuthenticated(true);
+  setUserRole(role);
+  setUserProfile(userToStore);
+  
+  if (role === 'admin') {
+    fetchAdminData();
+  } else {
+    fetchUserData();
+  }
+};
 
   return (
     <div className="login-page">
