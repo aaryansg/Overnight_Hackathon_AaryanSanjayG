@@ -1,4 +1,4 @@
-// App.jsx
+// App.jsx - Simplified without session checking
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import './App.css';
@@ -19,37 +19,37 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [userProfile, setUserProfile] = useState(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userRole, setUserRole] = useState('user'); // 'user' or 'admin'
+  const [userRole, setUserRole] = useState('user');
 
   useEffect(() => {
-    // Check if user is authenticated (e.g., from localStorage)
+    // Check localStorage for existing authentication
     const token = localStorage.getItem('userToken');
     const role = localStorage.getItem('userRole');
+    const userData = localStorage.getItem('userData');
     
-    if (token) {
+    if (token && role && userData) {
+      const parsedData = JSON.parse(userData);
       setIsAuthenticated(true);
-      setUserRole(role || 'user');
-      // Fetch user profile and documents based on role
-      if (role === 'admin') {
-        // Redirect to admin dashboard will be handled by router
-        fetchAdminData();
-      } else {
-        fetchUserData();
-      }
+      setUserRole(role);
+      setUserProfile({
+        name: parsedData.username,
+        role: parsedData.role === 'admin' ? 'System Administrator' : 'User',
+        department: parsedData.department,
+        email: parsedData.email,
+        userId: parsedData.role === 'admin' ? 'ADMIN-001' : `USER-${parsedData.id || '001'}`,
+        username: parsedData.username,
+        password: parsedData.password // Store password for API calls
+      });
+      
+      setLoading(false);
+    } else {
+      setLoading(false);
     }
   }, []);
 
   const fetchUserData = () => {
-    // Mock API call for regular user
+    // Mock data for regular user
     setTimeout(() => {
-      setUserProfile({
-        name: 'John Doe',
-        role: 'Infrastructure Manager',
-        department: 'Operations',
-        email: 'john.doe@infraco.com',
-        userId: 'INF-OP-2024-001'
-      });
-      
       setDocuments([
         {
           id: 1,
@@ -95,23 +95,24 @@ function App() {
   const fetchAdminData = () => {
     // For admin, we don't need regular user data
     setTimeout(() => {
-      setUserProfile({
-        name: 'Administrator',
-        role: 'System Administrator',
-        department: 'IT',
-        email: 'admin@infraco.com',
-        userId: 'ADMIN-001'
-      });
       setLoading(false);
     }, 500);
   };
 
   const handleLogin = (userData, role = 'user') => {
-    localStorage.setItem('userToken', 'mock-jwt-token');
+    // Store user data with password for API calls
+    const userToStore = {
+      ...userData,
+      password: userData.password || 'password123' // Use actual password from login
+    };
+    
+    localStorage.setItem('userToken', 'authenticated');
     localStorage.setItem('userRole', role);
+    localStorage.setItem('userData', JSON.stringify(userToStore));
+    
     setIsAuthenticated(true);
     setUserRole(role);
-    setUserProfile(userData);
+    setUserProfile(userToStore);
     
     if (role === 'admin') {
       fetchAdminData();
@@ -123,12 +124,9 @@ function App() {
   const handleLogout = () => {
     localStorage.removeItem('userToken');
     localStorage.removeItem('userRole');
-    localStorage.removeItem('isAuthenticated');
-  
-  // Clear session storage
-    sessionStorage.clear();
-  
-  // Clear app state
+    localStorage.removeItem('userData');
+    
+    // Clear all state
     setIsAuthenticated(false);
     setUserRole('user');
     setUserProfile(null);
@@ -252,6 +250,7 @@ function App() {
               </>
             </ProtectedRoute>
           } />
+          
           <Route path="/department-dashboard" element={
             <ProtectedRoute>
               <>
@@ -267,6 +266,7 @@ function App() {
               </>
             </ProtectedRoute>
           } />
+          
           <Route path="/library" element={
             <ProtectedRoute>
               <>

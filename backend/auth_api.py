@@ -1,5 +1,4 @@
-# auth_api.py
-from flask import Blueprint, request, jsonify, session
+from flask import Blueprint, request, jsonify
 from models import db, User, Document
 import os
 from werkzeug.utils import secure_filename
@@ -7,8 +6,8 @@ import uuid
 import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 from dotenv import load_dotenv
+import base64
 
-# Load environment variables
 load_dotenv()
 
 auth_bp = Blueprint('auth', __name__)
@@ -20,14 +19,13 @@ UPLOAD_FOLDER = 'uploads'
 # DEFINE DEPARTMENTS CONSTANT HERE
 DEPARTMENTS = ['engineering', 'operations', 'procurement', 'hr', 'safety', 'compliance', 'admin']
 
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 # AWS S3 Configuration
 AWS_S3_BUCKET = os.getenv('AWS_S3_BUCKET')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-# Initialize S3 client
 def get_s3_client():
     return boto3.client(
         's3',
@@ -36,22 +34,78 @@ def get_s3_client():
         region_name=AWS_REGION
     )
 
-# Helper function to check if user is logged in
-def login_required(f):
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            return jsonify({'error': 'Please login first'}), 401
-        return f(*args, **kwargs)
-    decorated_function.__name__ = f.__name__
-    return decorated_function
+# Simple authentication helper
+def authenticate_user(username, password, required_role=None):
+    """Authenticate user and check optional role requirement"""
+    user = User.query.filter_by(username=username).first()
+    
+    if not user:
+        return None
+    
+    if not user.check_password(password):
+        return None
+    
+    if not user.is_active:
+        return None
+    
+    if required_role and user.role != required_role:
+        return None
+    
+    return user
 
-# Helper function to get current user
-def get_current_user():
-    if 'user_id' in session:
-        user = User.query.get(session['user_id'])
-        if user:
-            return user
-    return None
+def get_user_from_request():
+    """Extract user credentials from request"""
+    # Try Basic Auth header
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.startswith('Basic '):
+        try:
+            auth_decoded = base64.b64decode(auth_header[6:]).decode('utf-8')
+            username, password = auth_decoded.split(':', 1)
+            return username, password
+        except:
+            pass
+    
+    # Try JSON body
+    data = request.get_json(silent=True)
+    if data:
+        username = data.get('username')
+        password = data.get('password')
+        if username and password:
+            return username, password
+    
+    # Try form data
+    username = request.form.get('username')
+    password = request.form.get('password')
+    if username and password:
+        return username, password
+    
+    # Try query parameters
+    username = request.args.get('username')
+    password = request.args.get('password')
+    if username and password:
+        return username, password
+    
+    return None, None
+
+def auth_required(required_role=None):
+    """Decorator for authentication"""
+    def decorator(f):
+        def wrapper(*args, **kwargs):
+            username, password = get_user_from_request()
+            
+            if not username or not password:
+                return jsonify({'error': 'Authentication required'}), 401
+            
+            user = authenticate_user(username, password, required_role)
+            if not user:
+                return jsonify({'error': 'Invalid credentials or insufficient permissions'}), 401
+            
+            # Attach user to request context
+            request.user = user
+            return f(*args, **kwargs)
+        wrapper.__name__ = f.__name__
+        return wrapper
+    return decorator
 
 @auth_bp.route('/register', methods=['POST'])
 def register():
@@ -87,9 +141,6 @@ def register():
         db.session.add(user)
         db.session.commit()
         
-        # Set session
-        session['user_id'] = user.id
-        
         return jsonify({
             'message': 'User registered successfully',
             'user': user.to_dict()
@@ -118,9 +169,6 @@ def login():
         if not user.is_active:
             return jsonify({'error': 'Account is disabled'}), 403
         
-        # Set session
-        session['user_id'] = user.id
-        
         return jsonify({
             'message': 'Login successful',
             'user': user.to_dict()
@@ -131,16 +179,24 @@ def login():
 
 @auth_bp.route('/logout', methods=['POST'])
 def logout():
-    session.pop('user_id', None)
     return jsonify({'message': 'Logged out successfully'})
 
-@auth_bp.route('/me', methods=['GET'])
+@auth_bp.route('/me', methods=['POST'])
 def get_current_user_info():
-    user = get_current_user()
-    if not user:
-        return jsonify({'error': 'Not logged in'}), 401
-    
-    return jsonify(user.to_dict())
+    try:
+        data = request.get_json()
+        
+        if not data or not data.get('username') or not data.get('password'):
+            return jsonify({'error': 'Authentication required'}), 401
+        
+        user = authenticate_user(data['username'], data['password'])
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
+        
+        return jsonify(user.to_dict())
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @auth_bp.route('/departments', methods=['GET'])
 def get_departments():
@@ -153,10 +209,10 @@ def get_categories():
     return jsonify([cat[0] for cat in categories])
 
 @doc_bp.route('/upload', methods=['POST'])
-@login_required
+@auth_required()
 def upload_document():
     try:
-        user = get_current_user()
+        user = request.user
         
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
@@ -213,10 +269,18 @@ def upload_document():
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/upload-s3', methods=['POST'])
-@login_required
 def upload_document_s3():
     try:
-        user = get_current_user()
+        # Get credentials from form data
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if not username or not password:
+            return jsonify({'error': 'Authentication required'}), 401
+        
+        user = authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
         
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
@@ -304,10 +368,18 @@ def upload_document_s3():
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/documents', methods=['GET'])
-@login_required
 def get_documents():
     try:
-        user = get_current_user()
+        # Get credentials
+        username = request.args.get('username')
+        password = request.args.get('password')
+        
+        if not username or not password:
+            return jsonify({'error': 'Authentication required'}), 401
+        
+        user = authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
         
         department = request.args.get('department')
         category = request.args.get('category')
@@ -338,10 +410,18 @@ def get_documents():
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/documents/<int:doc_id>', methods=['GET'])
-@login_required
 def get_document(doc_id):
     try:
-        user = get_current_user()
+        # Get credentials
+        username = request.args.get('username')
+        password = request.args.get('password')
+        
+        if not username or not password:
+            return jsonify({'error': 'Authentication required'}), 401
+        
+        user = authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
         
         document = Document.query.get_or_404(doc_id)
         
@@ -359,10 +439,18 @@ def get_document(doc_id):
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/documents/<int:doc_id>/download', methods=['GET'])
-@login_required
 def download_document(doc_id):
     try:
-        user = get_current_user()
+        # Get credentials
+        username = request.args.get('username')
+        password = request.args.get('password')
+        
+        if not username or not password:
+            return jsonify({'error': 'Authentication required'}), 401
+        
+        user = authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
         
         document = Document.query.get_or_404(doc_id)
         
@@ -403,10 +491,19 @@ def download_document(doc_id):
         return jsonify({'error': str(e)}), 500
 
 @doc_bp.route('/documents/<int:doc_id>/presigned-url', methods=['GET'])
-@login_required
 def get_presigned_url(doc_id):
     try:
-        user = get_current_user()
+        # Get credentials
+        username = request.args.get('username')
+        password = request.args.get('password')
+        
+        if not username or not password:
+            return jsonify({'error': 'Authentication required'}), 401
+        
+        user = authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
+        
         document = Document.query.get_or_404(doc_id)
         
         # Check permissions
@@ -440,14 +537,9 @@ def get_presigned_url(doc_id):
         return jsonify({'error': str(e)}), 500
 
 @auth_bp.route('/users', methods=['GET'])
-@login_required
+@auth_required(required_role='admin')
 def get_users():
     try:
-        user = get_current_user()
-        
-        if user.role != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
         users = User.query.all()
         return jsonify([u.to_dict() for u in users])
         
@@ -455,14 +547,9 @@ def get_users():
         return jsonify({'error': str(e)}), 500
 
 @auth_bp.route('/users/<int:user_id>', methods=['PUT'])
-@login_required
+@auth_required(required_role='admin')
 def update_user(user_id):
     try:
-        user = get_current_user()
-        
-        if user.role != 'admin':
-            return jsonify({'error': 'Admin access required'}), 403
-        
         target_user = User.query.get_or_404(user_id)
         data = request.get_json()
         

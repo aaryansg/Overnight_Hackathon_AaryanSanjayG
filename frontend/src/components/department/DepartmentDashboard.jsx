@@ -13,25 +13,36 @@ const DepartmentDashboard = ({ userProfile }) => {
     fetchDepartmentDocuments();
   }, []);
 
-  const fetchDepartmentDocuments = async () => {
-    try {
-      const response = await fetch(`http://localhost:5000/api/processing/department-documents/${userProfile?.department}`, {
-        credentials: 'include'
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setDocuments(data);
-      } else {
-        console.error('Failed to fetch documents:', response.statusText);
-      }
-    } catch (error) {
-      console.error('Error fetching documents:', error);
-    } finally {
+  // Update the fetchDepartmentDocuments function
+const fetchDepartmentDocuments = async () => {
+  try {
+    if (!userProfile?.department) {
       setLoading(false);
+      return;
     }
-  };
 
+    const response = await fetch(`http://localhost:5000/api/processing/department-documents/${userProfile.department}`, {
+      method: 'GET',
+      credentials: 'include', // Important for sending cookies
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      setDocuments(data);
+    } else if (response.status === 403) {
+      console.error('Access denied - check user permissions');
+    } else {
+      console.error('Failed to fetch documents:', response.statusText);
+    }
+  } catch (error) {
+    console.error('Error fetching documents:', error);
+  } finally {
+    setLoading(false);
+  }
+};
   const filteredDocuments = documents.filter(doc => {
     if (filter === 'all') return true;
     if (filter === 'high') return doc.priority === 'high';

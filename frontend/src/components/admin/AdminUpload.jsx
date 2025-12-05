@@ -1,6 +1,7 @@
 // components/admin/AdminUpload.jsx
 import React, { useState } from 'react';
 import { Upload, X, File, Folder, Eye, EyeOff, Users } from 'lucide-react';
+import apiClient from '../api/apiClient';
 
 const AdminUpload = () => {
   const [files, setFiles] = useState([]);
