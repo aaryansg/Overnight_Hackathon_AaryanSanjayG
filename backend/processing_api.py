@@ -230,61 +230,89 @@ def get_department_documents(department):
         if user.role != 'admin' and user.department != department:
             return jsonify({'error': 'Access denied'}), 403
         
-        # Get documents for this department from database
-        documents = ProcessedDocument.query.filter_by(
+        # Get processed documents from database for this department
+        db_documents = ProcessedDocument.query.filter_by(
             department=department,
             status='processed'
         ).order_by(ProcessedDocument.processed_date.desc()).all()
         
-        # Also fetch from S3 for real-time data
-        s3_docs = list_s3_documents(department)
-        
-        # Combine database and S3 documents
+        # Convert database documents to response format
         all_documents = []
         
-        # Add database documents
-        for doc in documents:
-            all_documents.append({
+        for doc in db_documents:
+            # Parse JSON fields if they exist
+            key_points = []
+            action_items = []
+            
+            if doc.key_points:
+                try:
+                    key_points = json.loads(doc.key_points)
+                except:
+                    key_points = []
+            
+            if doc.action_items:
+                try:
+                    action_items = json.loads(doc.action_items)
+                except:
+                    action_items = []
+            
+            # Build document object
+            doc_obj = {
                 'id': doc.id,
                 'original_filename': doc.original_filename,
-                'processed_filename': doc.processed_filename,
                 'document_type': doc.document_type,
                 'department': doc.department,
-                'summary': doc.summary,
-                'key_points': json.loads(doc.key_points) if doc.key_points else [],
-                'action_items': json.loads(doc.action_items) if doc.action_items else [],
-                'deadline': doc.deadline,
-                'priority': doc.priority,
+                'summary': doc.summary or '',
+                'key_points': key_points,
+                'action_items': action_items,
+                'deadline': doc.deadline.isoformat() if doc.deadline else None,
+                'priority': doc.priority or 'medium',
                 'processed_date': doc.processed_date.isoformat() if doc.processed_date else None,
-                'processed_by': doc.processed_by,
-                'status': doc.status,
                 'file_path': doc.file_path,
-                'source': 'database'
-            })
+                'file_size': doc.doc_metadata.get('file_size', 'Unknown') if doc.doc_metadata else 'Unknown',
+                'uploaded_by': User.query.get(doc.processed_by).username if doc.processed_by else 'System',
+                'status': doc.status,
+                'source': 'database',
+                's3_url': doc.file_path if doc.file_path.startswith('http') else None,
+                'metadata': json.loads(doc.doc_metadata) if doc.doc_metadata else {}
+            }
+            all_documents.append(doc_obj)
         
-        # Add S3 documents that aren't in database
+        # Also fetch unprocessed S3 documents for this department
+        s3_docs = list_s3_documents(department)
+        
+        # Add S3 documents that aren't in database yet
         s3_filenames = [d['original_filename'] for d in all_documents]
         for s3_doc in s3_docs:
-            if os.path.basename(s3_doc['key']) not in s3_filenames:
+            filename = os.path.basename(s3_doc['key'])
+            if filename not in s3_filenames:
+                # Extract department from S3 key path
+                dept_from_key = s3_doc.get('department', department)
+                
                 all_documents.append({
-                    'id': None,
-                    'original_filename': os.path.basename(s3_doc['key']),
+                    'id': None,  # No database ID yet
+                    'original_filename': filename,
                     'document_type': s3_doc.get('document_type', 'unknown'),
-                    'department': s3_doc.get('department', 'unknown'),
-                    'summary': 'Document is in S3 but not yet fully processed',
+                    'department': dept_from_key,
+                    'summary': 'Document is in S3 but not yet fully processed. Please run processing.',
                     'key_points': [],
                     'action_items': [],
                     'priority': 'medium',
                     'processed_date': s3_doc.get('last_modified'),
-                    'status': 'in_s3',
+                    'status': 'pending_processing',
                     'source': 's3',
                     's3_url': s3_doc.get('url'),
-                    's3_key': s3_doc.get('key')
+                    's3_key': s3_doc.get('key'),
+                    'file_size': f"{s3_doc.get('size', 0) / 1024 / 1024:.2f} MB",
+                    'uploaded_by': 'System (S3)'
                 })
         
         return jsonify(all_documents)
         
     except Exception as e:
+        print(f"Error in get_department_documents: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @processing_bp.route('/document/<int:doc_id>', methods=['GET'])
