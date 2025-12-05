@@ -11,6 +11,7 @@ import Login from './components/Login';
 import Register from './components/Register';
 import ForgotPassword from './components/ForgotPassword';
 import AdminDashboard from './components/admin/AdminDashboard';
+import DepartmentDashboard from './components/department/DepartmentDashboard';
 import './components/Components.css';
 
 function App() {
@@ -251,7 +252,21 @@ function App() {
               </>
             </ProtectedRoute>
           } />
-          
+          <Route path="/department-dashboard" element={
+            <ProtectedRoute>
+              <>
+                <div className="sidebar-container">
+                  <Sidebar onLogout={handleLogout} userProfile={userProfile} />
+                </div>
+                <div className="main-container">
+                  <Navbar userProfile={userProfile} />
+                  <main className="main-content-area">
+                    <DepartmentDashboard userProfile={userProfile} />
+                  </main>
+                </div>
+              </>
+            </ProtectedRoute>
+          } />
           <Route path="/library" element={
             <ProtectedRoute>
               <>

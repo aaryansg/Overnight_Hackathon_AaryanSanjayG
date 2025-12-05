@@ -1,20 +1,40 @@
+# auth_api.py
 from flask import Blueprint, request, jsonify, session
 from models import db, User, Document
 import os
 from werkzeug.utils import secure_filename
 import uuid
+import boto3
+from botocore.exceptions import NoCredentialsError, ClientError
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 auth_bp = Blueprint('auth', __name__)
 doc_bp = Blueprint('documents', __name__)
 
-ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'jpg', 'png'}
+ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'jpg', 'png', 'jpeg'}
 UPLOAD_FOLDER = 'uploads'
 
 # DEFINE DEPARTMENTS CONSTANT HERE
 DEPARTMENTS = ['engineering', 'operations', 'procurement', 'hr', 'safety', 'compliance', 'admin']
 
+# AWS S3 Configuration
+AWS_S3_BUCKET = os.getenv('AWS_S3_BUCKET')
+AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# Initialize S3 client
+def get_s3_client():
+    return boto3.client(
+        's3',
+        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+        region_name=AWS_REGION
+    )
 
 # Helper function to check if user is logged in
 def login_required(f):
@@ -192,6 +212,97 @@ def upload_document():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@doc_bp.route('/upload-s3', methods=['POST'])
+@login_required
+def upload_document_s3():
+    try:
+        user = get_current_user()
+        
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not allowed_file(file.filename):
+            return jsonify({'error': 'File type not allowed'}), 400
+        
+        # Get form data
+        title = request.form.get('title', '')
+        description = request.form.get('description', '')
+        department = request.form.get('department', user.department)
+        category = request.form.get('category', '')
+        tags = request.form.get('tags', '')
+        
+        if department not in DEPARTMENTS:
+            return jsonify({'error': 'Invalid department'}), 400
+        
+        # Generate unique filename for S3
+        filename = secure_filename(file.filename)
+        unique_filename = f"{uuid.uuid4().hex}_{filename}"
+        
+        # Upload to S3
+        s3_client = get_s3_client()
+        
+        try:
+            # Get file content for size calculation
+            file_content = file.read()
+            file_size = len(file_content)
+            file.seek(0)  # Reset file pointer for upload
+            
+            # Upload file to S3
+            s3_client.upload_fileobj(
+                file,
+                AWS_S3_BUCKET,
+                unique_filename,
+                ExtraArgs={
+                    'ContentType': file.content_type,
+                    'Metadata': {
+                        'uploaded-by': user.username,
+                        'department': department,
+                        'category': category,
+                        'original-filename': filename
+                    }
+                }
+            )
+            
+            # Generate S3 URL
+            s3_url = f"https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{unique_filename}"
+            
+            # Create document record in database
+            document = Document(
+                title=title or filename,
+                description=description,
+                filename=filename,
+                file_path=s3_url,  # Store S3 URL instead of local path
+                file_size=file_size,
+                file_type=filename.rsplit('.', 1)[1].lower(),
+                department=department,
+                category=category,
+                tags=tags,
+                uploaded_by=user.id,
+                status='active'
+            )
+            
+            db.session.add(document)
+            db.session.commit()
+            
+            return jsonify({
+                'message': 'File uploaded to S3 successfully',
+                'document': document.to_dict(),
+                's3_url': s3_url
+            }), 201
+            
+        except NoCredentialsError:
+            return jsonify({'error': 'AWS credentials not available'}), 500
+        except ClientError as e:
+            return jsonify({'error': f'S3 upload error: {str(e)}'}), 500
+            
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 @doc_bp.route('/documents', methods=['GET'])
 @login_required
 def get_documents():
@@ -259,12 +370,71 @@ def download_document(doc_id):
         if user.role != 'admin' and user.department != document.department:
             return jsonify({'error': 'Access denied'}), 403
         
-        # Increment download count
-        document.downloads += 1
-        db.session.commit()
+        # Check if file is in S3 or local
+        if document.file_path.startswith('https://'):
+            # File is in S3 - generate presigned URL
+            s3_key = document.file_path.split(f'https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/')[-1]
+            s3_client = get_s3_client()
+            presigned_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': AWS_S3_BUCKET,
+                    'Key': s3_key
+                },
+                ExpiresIn=3600  # URL expires in 1 hour
+            )
+            
+            # Increment download count
+            document.downloads += 1
+            db.session.commit()
+            
+            return jsonify({
+                'download_url': presigned_url,
+                'filename': document.filename
+            })
+        else:
+            # File is local
+            from flask import send_file
+            document.downloads += 1
+            db.session.commit()
+            return send_file(document.file_path, as_attachment=True, download_name=document.filename)
         
-        from flask import send_file
-        return send_file(document.file_path, as_attachment=True, download_name=document.filename)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@doc_bp.route('/documents/<int:doc_id>/presigned-url', methods=['GET'])
+@login_required
+def get_presigned_url(doc_id):
+    try:
+        user = get_current_user()
+        document = Document.query.get_or_404(doc_id)
+        
+        # Check permissions
+        if user.role != 'admin' and user.department != document.department:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        # Check if file is in S3
+        if not document.file_path.startswith('https://'):
+            return jsonify({'error': 'File is not stored in S3'}), 400
+        
+        # Extract filename from S3 URL
+        s3_key = document.file_path.split(f'https://{AWS_S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/')[-1]
+        
+        # Generate presigned URL
+        s3_client = get_s3_client()
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': AWS_S3_BUCKET,
+                'Key': s3_key
+            },
+            ExpiresIn=3600  # URL expires in 1 hour
+        )
+        
+        return jsonify({
+            'presigned_url': presigned_url,
+            'filename': document.filename
+        })
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -315,3 +485,8 @@ def update_user(user_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
+# Health check endpoint
+@auth_bp.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy', 'service': 'InfraDoc API'})

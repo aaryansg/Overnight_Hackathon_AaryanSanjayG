@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import AdminSidebar from './AdminSidebar';
 import AdminNavbar from './AdminNavbar';
-import AdminUpload from './AdminUpload';
+import AdminUploadS3 from './AdminUploadS3';
 import './AdminDashboard.css';
 
 const AdminDashboard = ({ onLogout }) => {
@@ -50,7 +50,7 @@ const AdminDashboard = ({ onLogout }) => {
   const renderContent = () => {
     switch(activeTab) {
       case 'upload':
-        return <AdminUpload />;
+        return <AdminUploadS3 />;
       case 'users':
         return (
           <div className="admin-users">

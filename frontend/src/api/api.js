@@ -58,6 +58,12 @@ const apiFormRequest = async (endpoint, formData) => {
   }
 };
 
+export const processingAPI = {
+  processDocuments: (formData) => apiFormRequest('/processing/process-documents', formData),
+  getDepartmentDocuments: (department) => apiRequest(`/processing/department-documents/${department}`),
+  getDocumentDetails: (docId) => apiRequest(`/processing/document/${docId}`),
+};
+
 export const authAPI = {
   login: (credentials) => apiRequest('/auth/login', {
     method: 'POST',
